@@ -136,7 +136,7 @@ def _pick_audio_url(info: dict) -> str | None:
     if is_direct(url):
         return url
     formats = info.get("formats") or []
-    best = None
+    best_combined = best_audio = None
     for f in formats:
         acodec = f.get("acodec") or ""
         fu = f.get("url") or ""
@@ -144,9 +144,16 @@ def _pick_audio_url(info: dict) -> str | None:
         if acodec == "none" or not is_direct(fu) or "m3u8" in proto:
             continue
         bitrate = f.get("tbr") or f.get("abr") or 0
-        if best is None or bitrate > best[0]:
-            best = (bitrate, fu)
-    return best[1] if best else None
+        combined = (f.get("vcodec") or "") != "none"
+        slot = best_combined if combined else best_audio
+        if slot is None or bitrate > slot[0]:
+            slot = (bitrate, fu)
+            if combined:
+                best_combined = slot
+            else:
+                best_audio = slot
+    winner = best_combined or best_audio
+    return winner[1] if winner else None
     return None
 
 
@@ -161,6 +168,23 @@ _UA = (
 )
 
 _RELAY_HEADERS = ("content-type", "content-range", "content-length", "accept-ranges")
+
+
+def _cookie_header() -> str:
+    """Build a Cookie header from the Netscape cookies.txt file."""
+    try:
+        pairs = []
+        with open(_COOKIE_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                p = line.split("\t")
+                if len(p) >= 7:
+                    pairs.append(f"{p[5]}={p[6]}")
+        return "; ".join(pairs)
+    except Exception:
+        return ""
 
 
 @app.get("/stream")
@@ -198,6 +222,9 @@ async def stream(request: Request, url: str | None = Query(default=None),
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
+    cookie = _cookie_header()
+    if cookie:
+        headers["Cookie"] = cookie
 
     async with httpx.AsyncClient(timeout=None) as client:
         resp = await client.send(

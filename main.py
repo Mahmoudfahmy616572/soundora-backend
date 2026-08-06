@@ -4,17 +4,21 @@ Search YouTube via yt-dlp and return a direct full-length audio URL plus the
 headers needed to stream it. Used as the full-song fallback in the Flutter app.
 """
 
+import asyncio
 import base64
+import hashlib
 import os
 import re
 import shutil
 import tempfile
+import time
 
+import anyio
 import httpx
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from starlette.responses import FileResponse
 
 app = FastAPI(title="Soundora Audio Resolver")
 
@@ -162,40 +166,43 @@ def health():
     return {"status": "ok"}
 
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-)
-
-_RELAY_HEADERS = ("content-type", "content-range", "content-length", "accept-ranges")
+_STREAM_CACHE: dict[str, tuple[str, float]] = {}
+_STREAM_LOCKS: dict[str, asyncio.Lock] = {}
+_CACHE_TTL = 15 * 60
 
 
-def _cookie_header() -> str:
-    """Build a Cookie header from the Netscape cookies.txt file."""
-    try:
-        pairs = []
-        with open(_COOKIE_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                p = line.split("\t")
-                if len(p) >= 7:
-                    pairs.append(f"{p[5]}={p[6]}")
-        return "; ".join(pairs)
-    except Exception:
-        return ""
+def _download_to_file(url: str) -> str:
+    """Download a signed googlevideo URL fully to a local temp file.
+
+    Streaming relays get cut mid-transfer by the CDN; a bounded download via
+    yt-dlp (which handles cookies + n-sig at request time) completes reliably.
+    The app then gets a stable local file with full Range support.
+    """
+    h = hashlib.sha256(url.encode()).hexdigest()[:20]
+    out = os.path.join(tempfile.gettempdir(), f"yt_{h}.mp4")
+    opts = {
+        **_BASE_OPTS,
+        "outtmpl": out,
+        "noprogress": True,
+        "overwrites": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    if not os.path.isfile(out):
+        raise RuntimeError("download produced no file")
+    return out
 
 
 @app.get("/stream")
 async def stream(request: Request, url: str | None = Query(default=None),
                  u: str | None = Query(default=None)):
-    """Relay a YouTube googlevideo stream through the backend.
+    """Download the signed googlevideo stream and serve it as a local file.
 
     The googlevideo URLs returned by /resolve are signed for this backend's
     IP, so a device whose egress differs (e.g. the Android emulator) gets a 403
     when streaming them directly. Serving the audio from here makes the request
-    originate from the signing IP and keeps Range support for seeking.
+    originate from the signing IP, and downloading before serving avoids the
+    mid-transfer drops the raw relay experienced.
 
     Pass the stream URL via ``url`` or, when a reverse proxy might inspect the
     query (e.g. Codespaces tunnels), via ``u`` as base64url-encoded.
@@ -213,33 +220,30 @@ async def stream(request: Request, url: str | None = Query(default=None),
     if "googlevideo.com" not in host:
         raise HTTPException(status_code=400, detail="unsupported host")
 
-    headers = {
-        "User-Agent": _UA,
-        "Accept": "audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-us,en;q=0.5",
-        "Referer": "https://www.youtube.com/",
-    }
-    range_header = request.headers.get("range")
-    if range_header:
-        headers["Range"] = range_header
-    cookie = _cookie_header()
-    if cookie:
-        headers["Cookie"] = cookie
+    h = hashlib.sha256(url.encode()).hexdigest()[:20]
+    lock = _STREAM_LOCKS.setdefault(h, asyncio.Lock())
 
-    async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
-        resp = await client.send(
-            client.build_request("GET", url, headers=headers), stream=True
+    def _fresh(entry) -> bool:
+        return (
+            entry is not None
+            and os.path.exists(entry[0])
+            and time.time() - entry[1] < _CACHE_TTL
         )
-        relay = {}
-        for h in _RELAY_HEADERS:
-            v = resp.headers.get(h)
-            if v:
-                relay[h] = v
-        return StreamingResponse(
-            resp.aiter_bytes(),
-            status_code=resp.status_code,
-            headers=relay,
-        )
+
+    entry = _STREAM_CACHE.get(h)
+    if not _fresh(entry):
+        async with lock:
+            entry = _STREAM_CACHE.get(h)
+            if not _fresh(entry):
+                try:
+                    path = await anyio.to_thread.run_sync(_download_to_file, url)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=502, detail=f"download failed: {exc}"
+                    )
+                entry = (path, time.time())
+                _STREAM_CACHE[h] = entry
+    return FileResponse(entry[0], media_type="video/mp4")
 
 
 @app.get("/resolve")

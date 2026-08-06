@@ -129,18 +129,23 @@ def _resolve(video_id: str) -> dict:
 
 
 def _pick_audio_url(info: dict) -> str | None:
+    def is_direct(u: str | None) -> bool:
+        return bool(u) and "manifest.googlevideo.com" not in u and not u.endswith(".m3u8")
+
     url = info.get("url")
-    if url:
+    if is_direct(url):
         return url
     formats = info.get("formats") or []
     best = None
     for f in formats:
         acodec = f.get("acodec") or ""
-        if acodec == "none" or not f.get("url"):
+        fu = f.get("url") or ""
+        proto = f.get("protocol") or ""
+        if acodec == "none" or not is_direct(fu) or "m3u8" in proto:
             continue
         bitrate = f.get("tbr") or f.get("abr") or 0
         if best is None or bitrate > best[0]:
-            best = (bitrate, f["url"])
+            best = (bitrate, fu)
     return best[1] if best else None
     return None
 

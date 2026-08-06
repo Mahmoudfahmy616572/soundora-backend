@@ -32,6 +32,11 @@ _BASE_OPTS = {
 }
 
 _COOKIE_FILE = os.environ.get("YT_COOKIES", "").strip()
+if not _COOKIE_FILE:
+    for _candidate in ("cookies.txt", os.path.join(os.path.dirname(__file__), "cookies.txt")):
+        if os.path.exists(_candidate):
+            _COOKIE_FILE = _candidate
+            break
 if _COOKIE_FILE:
     _BASE_OPTS["cookiefile"] = _COOKIE_FILE
 

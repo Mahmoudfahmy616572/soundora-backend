@@ -4,7 +4,6 @@ Search YouTube via yt-dlp and return a direct full-length audio URL plus the
 headers needed to stream it. Used as the full-song fallback in the Flutter app.
 """
 
-import asyncio
 import base64
 import hashlib
 import os
@@ -13,7 +12,6 @@ import shutil
 import tempfile
 import time
 
-import anyio
 import httpx
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -183,45 +181,91 @@ def health():
     return {"status": "ok"}
 
 
-_STREAM_CACHE: dict[str, tuple[str, float]] = {}
-_STREAM_LOCKS: dict[str, asyncio.Lock] = {}
+_CACHE_DIR = os.path.join(tempfile.gettempdir(), "yt_stream")
+_URL_FILES: dict[str, tuple[str, float]] = {}
 _CACHE_TTL = 15 * 60
 
+_MEDIA_TYPES = {
+    "mp4": "audio/mp4",
+    "m4a": "audio/mp4",
+    "opus": "audio/opus",
+    "webm": "audio/webm",
+    "ogg": "audio/ogg",
+    "mpeg": "audio/mpeg",
+}
 
-def _download_to_file(url: str) -> str:
-    """Download a signed googlevideo URL fully to a local temp file.
 
-    Streaming relays get cut mid-transfer by the CDN; a bounded download via
-    yt-dlp (which handles cookies + n-sig at request time) completes reliably.
-    The app then gets a stable local file with full Range support.
+def _media_type(path: str) -> str:
+    ext = os.path.splitext(path)[1].lstrip(".").lower()
+    return _MEDIA_TYPES.get(ext, "audio/mpeg")
+
+
+def _sweep_cache(keep_seconds: int = 3600, max_files: int = 50) -> None:
+    try:
+        files = [
+            os.path.join(_CACHE_DIR, f)
+            for f in os.listdir(_CACHE_DIR)
+            if os.path.isfile(os.path.join(_CACHE_DIR, f))
+        ]
+    except OSError:
+        return
+    files.sort(key=os.path.getmtime)
+    now = time.time()
+    removed = 0
+    for p in files:
+        stale = now - os.path.getmtime(p) > keep_seconds
+        overflow = len(files) - removed > max_files
+        if stale or overflow:
+            try:
+                os.remove(p)
+                removed += 1
+            except OSError:
+                pass
+
+
+def _download_song(video_id: str) -> str:
+    """Download a song by video id through the full yt-dlp pipeline.
+
+    Raw googlevideo URL relays/generic downloads get 403 for real songs (n-sig /
+    pot are validated at request time). Downloading by video id lets yt-dlp run
+    its full extractor (cookies + JS runtime) and produce a playable local file,
+    which the /stream endpoint then serves with full Range support.
     """
-    h = hashlib.sha256(url.encode()).hexdigest()[:20]
-    out = os.path.join(tempfile.gettempdir(), f"yt_{h}.mp4")
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    template = os.path.join(_CACHE_DIR, f"{video_id}.%(ext)s")
     opts = {
         **_BASE_OPTS,
-        "outtmpl": out,
+        "outtmpl": template,
         "noprogress": True,
         "overwrites": True,
     }
-    opts.pop("format", None)  # direct googlevideo URLs break with format select
     _refresh_cookie_scratch()
     with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    if not os.path.isfile(out):
+        ydl.download([video_id])
+    try:
+        matches = [
+            os.path.join(_CACHE_DIR, f)
+            for f in os.listdir(_CACHE_DIR)
+            if f.startswith(video_id + ".")
+        ]
+    except OSError:
+        matches = []
+    if not matches:
         raise RuntimeError("download produced no file")
-    return out
+    _sweep_cache()
+    return max(matches, key=lambda p: (os.path.getmtime(p), os.path.getsize(p)))
 
 
 @app.get("/stream")
 async def stream(request: Request, url: str | None = Query(default=None),
                  u: str | None = Query(default=None)):
-    """Download the signed googlevideo stream and serve it as a local file.
+    """Serve a previously downloaded full song as a local file.
 
-    The googlevideo URLs returned by /resolve are signed for this backend's
-    IP, so a device whose egress differs (e.g. the Android emulator) gets a 403
-    when streaming them directly. Serving the audio from here makes the request
-    originate from the signing IP, and downloading before serving avoids the
-    mid-transfer drops the raw relay experienced.
+    The googlevideo URLs returned by /resolve are signed for this backend's IP,
+    so a device whose egress differs (e.g. the Android emulator) gets a 403 when
+    streaming them directly. /resolve downloads the song via the full yt-dlp
+    pipeline and registers it here, keyed by the exact URL it returned; this
+    endpoint serves that file back with Range support.
 
     Pass the stream URL via ``url`` or, when a reverse proxy might inspect the
     query (e.g. Codespaces tunnels), via ``u`` as base64url-encoded.
@@ -240,29 +284,13 @@ async def stream(request: Request, url: str | None = Query(default=None),
         raise HTTPException(status_code=400, detail="unsupported host")
 
     h = hashlib.sha256(url.encode()).hexdigest()[:20]
-    lock = _STREAM_LOCKS.setdefault(h, asyncio.Lock())
-
-    def _fresh(entry) -> bool:
-        return (
-            entry is not None
-            and os.path.exists(entry[0])
-            and time.time() - entry[1] < _CACHE_TTL
+    entry = _URL_FILES.get(h)
+    if not entry or not os.path.exists(entry[0]) or time.time() - entry[1] > _CACHE_TTL:
+        raise HTTPException(
+            status_code=502,
+            detail="no cached audio for this url; please resolve again",
         )
-
-    entry = _STREAM_CACHE.get(h)
-    if not _fresh(entry):
-        async with lock:
-            entry = _STREAM_CACHE.get(h)
-            if not _fresh(entry):
-                try:
-                    path = await anyio.to_thread.run_sync(_download_to_file, url)
-                except Exception as exc:
-                    raise HTTPException(
-                        status_code=502, detail=f"download failed: {exc}"
-                    )
-                entry = (path, time.time())
-                _STREAM_CACHE[h] = entry
-    return FileResponse(entry[0], media_type="video/mp4")
+    return FileResponse(entry[0], media_type=_media_type(entry[0]))
 
 
 @app.get("/resolve")
@@ -300,6 +328,12 @@ def resolve(title: str = Query(...), artist: str = ""):
         if not url:
             continue
         headers = info.get("http_headers") or {}
+        try:
+            path = _download_song(video_id)
+        except Exception as e:
+            last_error = str(e)
+            continue
+        _URL_FILES[hashlib.sha256(url.encode()).hexdigest()[:20]] = (path, time.time())
         return {
             "videoId": info.get("id"),
             "title": info.get("title"),

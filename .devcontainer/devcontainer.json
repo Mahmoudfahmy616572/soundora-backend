@@ -1,6 +1,9 @@
 {
   "name": "soundora-backend",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {}
+  },
   "forwardPorts": [8000],
   "postCreateCommand": "pip install --no-cache-dir -r requirements.txt",
   "postStartCommand": "if ! pgrep -f 'uvicorn main:app' > /dev/null; then nohup uvicorn main:app --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 & fi",

@@ -39,6 +39,7 @@ _BASE_OPTS = {
     "remote_components": "ejs:github",
 }
 
+_COOKIE_MASTER: str | None = None
 _COOKIE_FILE = os.environ.get("YT_COOKIES", "").strip()
 if not _COOKIE_FILE:
     for _candidate in ("cookies.txt", os.path.join(os.path.dirname(__file__), "cookies.txt")):
@@ -49,13 +50,27 @@ if _COOKIE_FILE:
     # yt-dlp writes back to the cookiefile it reads, which can shrink/corrupt
     # the master file. Keep a pristine master and let yt-dlp mutate a scratch
     # copy in /tmp instead.
+    _COOKIE_MASTER = _COOKIE_FILE
     _scratch = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
     try:
-        shutil.copyfile(_COOKIE_FILE, _scratch)
+        shutil.copyfile(_COOKIE_MASTER, _scratch)
         _COOKIE_FILE = _scratch
     except OSError:
-        pass
+        _COOKIE_MASTER = None
     _BASE_OPTS["cookiefile"] = _COOKIE_FILE
+
+
+def _refresh_cookie_scratch() -> None:
+    """Sync the working cookie copy from the master before each yt-dlp call.
+
+    Successful yt-dlp runs refresh the session in the master file; the scratch
+    copy used by the server would otherwise go stale and get 403s.
+    """
+    if _COOKIE_MASTER and _COOKIE_FILE:
+        try:
+            shutil.copyfile(_COOKIE_MASTER, _COOKIE_FILE)
+        except OSError:
+            pass
 
 # yt-dlp needs a JS runtime (deno) to solve YouTube signature/n challenges on
 # datacenter IPs. Make sure a user-level deno install is visible no matter how
@@ -78,6 +93,7 @@ def _search(query: str, limit: int = 8) -> list:
         "skip_download": True,
         "extract_flat": "in_playlist",
     }
+    _refresh_cookie_scratch()
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
         return info.get("entries") or []
@@ -128,6 +144,7 @@ def _pick_entry(candidates: list) -> dict | None:
 def _resolve(video_id: str) -> dict:
     opts = {**_BASE_OPTS, "skip_download": True}
     opts.pop("format", None)
+    _refresh_cookie_scratch()
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(video_id, download=False)
 
@@ -187,6 +204,7 @@ def _download_to_file(url: str) -> str:
         "overwrites": True,
     }
     opts.pop("format", None)  # direct googlevideo URLs break with format select
+    _refresh_cookie_scratch()
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
     if not os.path.isfile(out):

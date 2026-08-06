@@ -2,7 +2,8 @@
   "name": "soundora-backend",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "features": {
-    "ghcr.io/devcontainers/features/sshd:1": {}
+    "ghcr.io/devcontainers/features/sshd:1": {},
+    "ghcr.io/devcontainers/features/deno:1": {}
   },
   "forwardPorts": [8000],
   "postCreateCommand": "pip install --no-cache-dir -r requirements.txt",

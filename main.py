@@ -29,6 +29,7 @@ _BASE_OPTS = {
     "socket_timeout": 15,
     "retries": 2,
     "format": "bestaudio/best",
+    "remote_components": "ejs:github",
 }
 
 _COOKIE_FILE = os.environ.get("YT_COOKIES", "").strip()

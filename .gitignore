@@ -1,0 +1,4 @@
+# NEVER commit YouTube cookies - they are full account credentials.
+cookies.txt
+*.log
+__pycache__/

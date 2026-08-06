@@ -4,6 +4,7 @@ Search YouTube via yt-dlp and return a direct full-length audio URL plus the
 headers needed to stream it. Used as the full-song fallback in the Flutter app.
 """
 
+import os
 import re
 
 import httpx
@@ -29,6 +30,10 @@ _BASE_OPTS = {
     "retries": 2,
     "format": "bestaudio/best",
 }
+
+_COOKIE_FILE = os.environ.get("YT_COOKIES", "").strip()
+if _COOKIE_FILE:
+    _BASE_OPTS["cookiefile"] = _COOKIE_FILE
 
 _ID_RE = re.compile(r"^[\w-]{11}$")
 

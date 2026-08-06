@@ -7,6 +7,8 @@ headers needed to stream it. Used as the full-song fallback in the Flutter app.
 import base64
 import os
 import re
+import shutil
+import tempfile
 
 import httpx
 import yt_dlp
@@ -40,6 +42,15 @@ if not _COOKIE_FILE:
             _COOKIE_FILE = _candidate
             break
 if _COOKIE_FILE:
+    # yt-dlp writes back to the cookiefile it reads, which can shrink/corrupt
+    # the master file. Keep a pristine master and let yt-dlp mutate a scratch
+    # copy in /tmp instead.
+    _scratch = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+    try:
+        shutil.copyfile(_COOKIE_FILE, _scratch)
+        _COOKIE_FILE = _scratch
+    except OSError:
+        pass
     _BASE_OPTS["cookiefile"] = _COOKIE_FILE
 
 # yt-dlp needs a JS runtime (deno) to solve YouTube signature/n challenges on

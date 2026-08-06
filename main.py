@@ -42,6 +42,18 @@ if not _COOKIE_FILE:
 if _COOKIE_FILE:
     _BASE_OPTS["cookiefile"] = _COOKIE_FILE
 
+# yt-dlp needs a JS runtime (deno) to solve YouTube signature/n challenges on
+# datacenter IPs. Make sure a user-level deno install is visible no matter how
+# uvicorn was started (e.g. Codespaces postStart).
+for _deno_dir in (
+    os.path.join(os.path.expanduser("~"), ".deno", "bin"),
+    "/usr/local/bin",
+):
+    if os.path.isfile(os.path.join(_deno_dir, "deno")):
+        if _deno_dir not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = _deno_dir + os.pathsep + os.environ.get("PATH", "")
+        break
+
 _ID_RE = re.compile(r"^[\w-]{11}$")
 
 

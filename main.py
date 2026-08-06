@@ -186,6 +186,7 @@ def _download_to_file(url: str) -> str:
         "noprogress": True,
         "overwrites": True,
     }
+    opts.pop("format", None)  # direct googlevideo URLs break with format select
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
     if not os.path.isfile(out):

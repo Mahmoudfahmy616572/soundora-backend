@@ -112,6 +112,7 @@ def _pick_entry(candidates: list) -> dict | None:
 
 def _resolve(video_id: str) -> dict:
     opts = {**_BASE_OPTS, "skip_download": True}
+    opts.pop("format", None)
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(video_id, download=False)
 
@@ -121,10 +122,15 @@ def _pick_audio_url(info: dict) -> str | None:
     if url:
         return url
     formats = info.get("formats") or []
+    best = None
     for f in formats:
         acodec = f.get("acodec") or ""
-        if acodec != "none" and f.get("url"):
-            return f["url"]
+        if acodec == "none" or not f.get("url"):
+            continue
+        bitrate = f.get("tbr") or f.get("abr") or 0
+        if best is None or bitrate > best[0]:
+            best = (bitrate, f["url"])
+    return best[1] if best else None
     return None
 
 
@@ -199,32 +205,41 @@ def resolve(title: str = Query(...), artist: str = ""):
     if not query:
         raise HTTPException(status_code=400, detail="empty query")
 
-    chosen = None
+    candidates = []
     for variant in _query_variants(title, artist):
         try:
-            chosen = _pick_entry(_search(variant))
+            for entry in _search(variant):
+                if entry and entry not in candidates:
+                    candidates.append(entry)
         except Exception:
             continue
-        if chosen is not None:
+        if len(candidates) >= 6:
             break
-    if chosen is None:
+    if not candidates:
         raise HTTPException(status_code=404, detail="no result")
 
-    video_id = chosen.get("id")
-    if not video_id or not _ID_RE.match(video_id):
-        raise HTTPException(status_code=404, detail="invalid video id")
-
-    info = _resolve(video_id)
-    url = _pick_audio_url(info)
-    if not url:
-        raise HTTPException(status_code=404, detail="no audio url")
-
-    headers = info.get("http_headers") or {}
-    return {
-        "videoId": info.get("id"),
-        "title": info.get("title"),
-        "uploader": info.get("uploader"),
-        "duration": info.get("duration"),
-        "url": url,
-        "headers": headers,
-    }
+    last_error = None
+    for entry in candidates:
+        if _pick_entry([entry]) is None:
+            continue
+        video_id = entry.get("id")
+        if not video_id or not _ID_RE.match(video_id):
+            continue
+        try:
+            info = _resolve(video_id)
+        except Exception as e:
+            last_error = str(e)
+            continue
+        url = _pick_audio_url(info)
+        if not url:
+            continue
+        headers = info.get("http_headers") or {}
+        return {
+            "videoId": info.get("id"),
+            "title": info.get("title"),
+            "uploader": info.get("uploader"),
+            "duration": info.get("duration"),
+            "url": url,
+            "headers": headers,
+        }
+    raise HTTPException(status_code=500, detail=f"no audio url ({last_error})")

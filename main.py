@@ -4,6 +4,7 @@ Search YouTube via yt-dlp and return a direct full-length audio URL plus the
 headers needed to stream it. Used as the full-song fallback in the Flutter app.
 """
 
+import base64
 import os
 import re
 
@@ -129,14 +130,27 @@ _RELAY_HEADERS = ("content-type", "content-range", "content-length", "accept-ran
 
 
 @app.get("/stream")
-async def stream(request: Request, url: str = Query(...)):
+async def stream(request: Request, url: str | None = Query(default=None),
+                 u: str | None = Query(default=None)):
     """Relay a YouTube googlevideo stream through the backend.
 
     The googlevideo URLs returned by /resolve are signed for this backend's
     IP, so a device whose egress differs (e.g. the Android emulator) gets a 403
     when streaming them directly. Serving the audio from here makes the request
     originate from the signing IP and keeps Range support for seeking.
+
+    Pass the stream URL via ``url`` or, when a reverse proxy might inspect the
+    query (e.g. Codespaces tunnels), via ``u`` as base64url-encoded.
     """
+    if u is not None:
+        try:
+            padding = "=" * (-len(u) % 4)
+            url = base64.urlsafe_b64decode(u + padding).decode("utf-8")
+        except Exception:
+            raise HTTPException(status_code=400, detail="bad encoding")
+    if not url:
+        raise HTTPException(status_code=400, detail="missing url")
+
     host = httpx.URL(url).host or ""
     if "googlevideo.com" not in host:
         raise HTTPException(status_code=400, detail="unsupported host")

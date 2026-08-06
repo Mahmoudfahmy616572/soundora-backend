@@ -226,7 +226,7 @@ async def stream(request: Request, url: str | None = Query(default=None),
     if cookie:
         headers["Cookie"] = cookie
 
-    async with httpx.AsyncClient(timeout=None) as client:
+    async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
         resp = await client.send(
             client.build_request("GET", url, headers=headers), stream=True
         )
